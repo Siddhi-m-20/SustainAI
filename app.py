@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from datetime import datetime
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -569,32 +570,94 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("**FACILITY SCOPE**")
+    st.markdown(
+        "<div style='font-size:0.75rem; font-weight:700; color:#64748b; letter-spacing:0.8px; margin-bottom:8px;'>DATA SOURCE & TELEMETRY</div>",
+        unsafe_allow_html=True,
+    )
 
-    active_df = load_default_data()
+    data_source_mode = st.radio(
+        "Data Source Mode",
+        ["Default Campus Sample (8,640 hrs)", "Upload Custom Telemetry CSV"],
+        index=0,
+        label_visibility="collapsed",
+    )
+
+    uploaded_file = None
+    if data_source_mode == "Upload Custom Telemetry CSV":
+        uploaded_file = st.file_uploader(
+            "Upload Multi-Resource CSV",
+            type=["csv"],
+            help="Upload hourly telemetry CSV with columns: timestamp, building, and energy_kwh / water_m3 / waste_kg."
+        )
+        if uploaded_file is not None:
+            val_res = validate_multi_resource_data(uploaded_file)
+            if val_res["is_valid"]:
+                active_df = val_res["cleaned_df"]
+                st.success(f"✓ Ingested {len(active_df):,} rows from {uploaded_file.name}")
+            else:
+                st.error(f"Validation error: {val_res['errors'][0] if val_res['errors'] else 'Invalid file'}")
+                st.info("Using default campus telemetry dataset.")
+                active_df = load_default_data()
+        else:
+            st.info("Awaiting CSV file. Displaying default campus telemetry.")
+            active_df = load_default_data()
+    else:
+        active_df = load_default_data()
+
+    # Facility Scope Filter
+    st.markdown(
+        "<div style='font-size:0.75rem; font-weight:700; color:#64748b; letter-spacing:0.8px; margin-top:10px; margin-bottom:4px;'>FACILITY SCOPE</div>",
+        unsafe_allow_html=True,
+    )
     all_buildings = ["ALL FACILITIES"]
     if not active_df.empty and "building" in active_df.columns:
         all_buildings += sorted(list(active_df["building"].unique()))
 
     selected_building = st.selectbox("Facility Filter", all_buildings, index=0)
 
+    # Dynamic Telemetry Stream Status
+    num_records = len(active_df) if not active_df.empty else 0
+    num_facilities = active_df["building"].nunique() if (not active_df.empty and "building" in active_df.columns) else 0
+    stream_badge = "CUSTOM UPLOAD" if (data_source_mode.startswith("Upload") and uploaded_file is not None) else "ONLINE"
+
     st.markdown(
-        """
+        f"""
         <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px; padding: 12px 14px; margin-top: 12px;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
                 <span style="font-size:0.75rem; font-weight:700; color:#34d399; letter-spacing:0.4px;">● TELEMETRY STREAM</span>
-                <span style="font-size:0.72rem; color:#6ee7b7; background:rgba(16,185,129,0.15); padding:2px 6px; border-radius:4px;">ONLINE</span>
+                <span style="font-size:0.72rem; color:#6ee7b7; background:rgba(16,185,129,0.15); padding:2px 6px; border-radius:4px;">{stream_badge}</span>
             </div>
             <div style="font-size:0.82rem; color:#e2e8f0; font-weight:600; margin-top:4px;">
-                8,640 Hourly Records
+                {num_records:,} Hourly Records
             </div>
             <div style="font-size:0.75rem; color:#94a3b8; margin-top:2px;">
-                Continuous energy, water & waste telemetry across 4 facilities.
+                {num_facilities} monitored facilities across energy, water & waste.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    with st.expander("ℹ️ CSV Schema & Template"):
+        st.markdown(
+            """
+            **Required CSV Columns:**
+            - `timestamp` *(e.g. 2026-01-01 00:00)*
+            - `building` *(e.g. Building_A)*
+            - At least one of: `energy_kwh`, `water_m3`, `waste_kg`
+            """
+        )
+        sample_path = PROJECT_ROOT / "data" / "raw" / "campus_multi_resource_sample.csv"
+        if sample_path.exists():
+            with open(sample_path, "rb") as f:
+                st.download_button(
+                    "📥 Download Sample CSV",
+                    data=f.read(),
+                    file_name="campus_telemetry_sample.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="sidebar_sample_csv_download",
+                )
 
     st.markdown("---")
     st.caption("EcoSync Resource Manager • Author Project • Sustainable AI")
@@ -606,10 +669,10 @@ if active_df.empty:
     st.stop()
 
 # Filter df by building if selected
-view_df = active_df.copy()
+view_df: pd.DataFrame = pd.DataFrame(active_df.copy())
 bldg_filter_key = None if selected_building == "ALL FACILITIES" else selected_building
 if bldg_filter_key:
-    view_df = view_df[view_df["building"] == bldg_filter_key]
+    view_df = pd.DataFrame(view_df[view_df["building"] == bldg_filter_key])
 
 # Precompute baseline KPIs
 kpis = calculate_unified_campus_kpis(view_df)
@@ -690,8 +753,12 @@ if nav_selection == "🏠 Overview Dashboard":
         )
 
     with c4:
-        crit_count = len(filtered_anomalies[filtered_anomalies["severity_tier"] == "CRITICAL"]) if not filtered_anomalies.empty else 0
-        high_count = len(filtered_anomalies[filtered_anomalies["severity_tier"] == "HIGH"]) if not filtered_anomalies.empty else 0
+        if not filtered_anomalies.empty and "severity_tier" in filtered_anomalies.columns:
+            crit_count = int((filtered_anomalies["severity_tier"].astype(str).str.upper() == "CRITICAL").sum())
+            high_count = int((filtered_anomalies["severity_tier"].astype(str).str.upper() == "HIGH").sum())
+        else:
+            crit_count = 0
+            high_count = 0
         st.markdown(
             f"""
             <div class="metric-tile">
@@ -847,7 +914,7 @@ if nav_selection == "🏠 Overview Dashboard":
     col_chart_a, col_chart_b = st.columns([2, 1])
     with col_chart_a:
         st.markdown("#### **Multi-Resource Consumption Profile**")
-        chart_df = view_df.sort_values("timestamp").copy()
+        chart_df = pd.DataFrame(view_df.sort_values(by="timestamp")).copy()
         if "energy_kwh" in chart_df.columns:
             fig = px.line(
                 chart_df,
@@ -895,7 +962,7 @@ elif nav_selection == "⚡ Energy Intelligence":
     with col_e1:
         st.markdown("#### **24-Hour Diurnal Energy Profile**")
         df_diurnal = view_df.copy()
-        df_diurnal["hour"] = pd.to_datetime(df_diurnal["timestamp"]).dt.hour
+        df_diurnal["hour"] = pd.Series(pd.to_datetime(df_diurnal["timestamp"])).dt.hour
         hourly_prof = df_diurnal.groupby(["hour", "building"])["energy_kwh"].mean().reset_index()
         fig_diurnal = px.line(
             hourly_prof,
@@ -943,7 +1010,7 @@ elif nav_selection == "💧 Water Intelligence":
     col_w1, col_w2 = st.columns([2, 1])
     with col_w1:
         st.markdown("#### **Hourly Water Flow & Overnight Leak Watch**")
-        water_ts = view_df.sort_values("timestamp").copy()
+        water_ts = pd.DataFrame(view_df.sort_values(by="timestamp")).copy()
         fig_w = px.line(
             water_ts,
             x="timestamp",
@@ -1226,9 +1293,9 @@ elif nav_selection == "🧪 What-if Simulator":
     sim_bldg = st.selectbox("Target Facility for Intervention", all_buildings, index=0)
 
     # Facility Baseline Card
-    bldg_view = active_df.copy()
+    bldg_view: pd.DataFrame = pd.DataFrame(active_df.copy())
     if sim_bldg != "ALL FACILITIES":
-        bldg_view = bldg_view[bldg_view["building"] == sim_bldg]
+        bldg_view = pd.DataFrame(bldg_view[bldg_view["building"] == sim_bldg])
     
     b_kpis = calculate_unified_campus_kpis(bldg_view)
     be = b_kpis.get("energy", {})
@@ -1423,11 +1490,72 @@ elif nav_selection == "📚 Sustainability Knowledge":
 # -----------------------------------------------------------------------------
 elif nav_selection == "📊 Audit Reports":
     st.markdown("## 📊 Executive Sustainability Audit Report")
-    st.caption("Generate verifiable multi-resource compliance reports for facility management leadership.")
+    st.caption("Generate verifiable multi-resource compliance reports for facility management leadership and ESG auditors.")
 
     e = kpis.get("energy", {})
     w = kpis.get("water", {})
     r = kpis.get("waste", {})
+
+    crit_count = 0
+    high_count = 0
+    if not filtered_anomalies.empty and "severity_tier" in filtered_anomalies.columns:
+        crit_count = int((filtered_anomalies["severity_tier"].astype(str).str.upper() == "CRITICAL").sum())
+        high_count = int((filtered_anomalies["severity_tier"].astype(str).str.upper() == "HIGH").sum())
+
+    total_utility_cost = (
+        e.get("estimated_cost_usd", 0)
+        + w.get("estimated_cost_usd", 0)
+        + r.get("estimated_hauling_cost_usd", 0)
+    )
+
+    # Executive scorecard summary metrics
+    audit_col1, audit_col2, audit_col3, audit_col4 = st.columns(4)
+    with audit_col1:
+        st.markdown(
+            f"""
+            <div class="metric-tile">
+                <div class="tile-title"><span>💵 Utility Expenditure</span></div>
+                <div class="tile-val">${total_utility_cost:,.0f}</div>
+                <div class="tile-sub">Combined Energy, Water & Waste</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with audit_col2:
+        st.markdown(
+            f"""
+            <div class="metric-tile">
+                <div class="tile-title"><span>🌱 Scope 2 Emissions</span></div>
+                <div class="tile-val">{e.get('carbon_emissions_tco2e', 0):,.1f} <span style="font-size:0.9rem;color:#94a3b8;">tCO2e</span></div>
+                <div class="tile-sub">Grid Factor: 0.42 kg CO2e/kWh</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with audit_col3:
+        st.markdown(
+            f"""
+            <div class="metric-tile">
+                <div class="tile-title"><span>♻️ Landfill Diversion</span></div>
+                <div class="tile-val">{r.get('diversion_rate_pct', 0):.1f}%</div>
+                <div class="tile-sub">Benchmark: 75% Gold Zero-Waste</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with audit_col4:
+        st.markdown(
+            f"""
+            <div class="metric-tile">
+                <div class="tile-title"><span>🚨 Audit Risk Items</span></div>
+                <div class="tile-val" style="color:#ef4444;">{crit_count + high_count}</div>
+                <div class="tile-sub">{crit_count} Critical • {high_count} High Severity</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='margin-top:18px;'></div>", unsafe_allow_html=True)
 
     report_text = f"""# ECOSYNC RESOURCE MANAGER — EXECUTIVE FACILITY AUDIT REPORT
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -1442,22 +1570,22 @@ Facility Scope: {selected_building}
 • Potable Water Usage:         {w.get('total_m3', 0):,.1f} m³ ({w.get('total_liters', 0):,.0f} Liters)
 • Minimum Night Flow (MNF):    {w.get('min_night_flow_m3_h', 0):.2f} m³/hour
 • Landfill Diversion Rate:     {r.get('diversion_rate_pct', 0):.1f}% (Status: {r.get('status', 'Tracking')})
-• Total Utility Expenditure:   ${(e.get('estimated_cost_usd', 0) + w.get('estimated_cost_usd', 0) + r.get('estimated_hauling_cost_usd', 0)):,.2f} USD
+• Total Utility Expenditure:   ${total_utility_cost:,.2f} USD
 
 ================================================================================
 2. ANOMALY & OPERATIONAL RISK SUMMARY
 ================================================================================
 • Total Flagged Incidents:     {len(filtered_anomalies)}
-• Critical Severity:           {len(filtered_anomalies[filtered_anomalies['severity_tier'] == 'CRITICAL']) if not filtered_anomalies.empty else 0}
-• High Severity:               {len(filtered_anomalies[filtered_anomalies['severity_tier'] == 'HIGH']) if not filtered_anomalies.empty else 0}
+• Critical Severity:           {crit_count}
+• High Severity:               {high_count}
 
 ================================================================================
 3. PRIORITIZED OPERATIONAL ACTION ITEMS
 ================================================================================
 1. [Energy] Verify HVAC thermostat setback schedules (16°C heating / 28°C cooling)
-   during unoccupied windows (20:00 - 06:00).
+   during unoccupied windows (20:00 - 06:00) per ASHRAE 90.1 standards.
 2. [Water] Inspect restroom flushometer sensors and cooling tower makeup valves
-   in facilities exhibiting night flow > 1.0 m³/hour.
+   in facilities exhibiting night flow > 1.0 m³/hour (EPA WaterSense).
 3. [Waste] Expand back-of-house kitchen organic composting in dining facilities
    (Building C) to elevate diversion towards 75% Gold status.
 
@@ -1466,14 +1594,19 @@ learning baselines and international engineering standards. All recommendations
 warrant human facility engineering verification prior to mechanical alterations.
 """
 
-    st.text_area("Generated Audit Report Preview", report_text, height=380)
+    st.text_area("Generated Audit Report Preview", report_text, height=360)
 
-    st.download_button(
-        label="📥 Download Audit Report (.txt)",
-        data=report_text,
-        file_name=f"EcoSync_Audit_Report_{selected_building}_{datetime.now().strftime('%Y%m%d')}.txt",
-        mime="text/plain",
-    )
+    audit_btn_col1, audit_btn_col2 = st.columns([1, 2])
+    with audit_btn_col1:
+        st.download_button(
+            label="📥 Download Audit Report (.txt)",
+            data=report_text,
+            file_name=f"EcoSync_Audit_Report_{selected_building.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+    with audit_btn_col2:
+        st.info("💡 Report is formatted for direct presentation to facility leadership, campus sustainability committees, and ESG auditors.")
 
 
 # -----------------------------------------------------------------------------

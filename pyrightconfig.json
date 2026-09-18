@@ -1,0 +1,10 @@
+{
+  "include": [
+    "app.py",
+    "src",
+    "tests"
+  ],
+  "extraPaths": [
+    "."
+  ]
+}

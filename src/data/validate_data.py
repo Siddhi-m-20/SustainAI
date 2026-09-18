@@ -89,7 +89,7 @@ def detect_dataset_schema(df: pd.DataFrame) -> str:
 
 
 def validate_multi_resource_data(
-    data: Union[pd.DataFrame, str, Path],
+    data: Union[pd.DataFrame, str, Path, Any],
     expected_resource: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -101,7 +101,19 @@ def validate_multi_resource_data(
     warnings = []
 
     # 1. Load data
-    if isinstance(data, (str, Path)):
+    if hasattr(data, "read"):
+        try:
+            # If it's a file-like object (e.g. Streamlit UploadedFile)
+            data.seek(0)
+            df = pd.read_csv(data)
+        except Exception as e:
+            return {
+                "is_valid": False,
+                "errors": [f"Failed to read CSV file: {str(e)}"],
+                "warnings": [],
+                "cleaned_df": None,
+            }
+    elif isinstance(data, (str, Path)):
         try:
             df = pd.read_csv(data)
         except Exception as e:
@@ -116,7 +128,7 @@ def validate_multi_resource_data(
     else:
         return {
             "is_valid": False,
-            "errors": ["Input data must be a pandas DataFrame or file path."],
+            "errors": ["Input data must be a pandas DataFrame, file path, or file-like object."],
             "warnings": [],
             "cleaned_df": None,
         }
